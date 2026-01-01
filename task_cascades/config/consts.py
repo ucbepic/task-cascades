@@ -1,0 +1,5 @@
+from litellm import model_cost
+
+SENTINEL_CONF = 0.99
+CANDIDATE_FRACTIONS = [0.1, 0.25, 0.5, 1.0]
+MIN_TRAINING_SAMPLES = 150

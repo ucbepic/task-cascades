@@ -1,0 +1,11 @@
+ipython
+pandas
+ipykernel
+litellm
+python-dotenv
+seaborn
+matplotlib
+nltk
+docetl
+rich
+adjustText

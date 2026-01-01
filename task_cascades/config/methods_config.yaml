@@ -1,0 +1,27 @@
+# Task Cascades - Method Configuration
+# Enable/disable methods for experiments
+
+methods:
+  # ===================
+  # Main Methods
+  # ===================
+  task_cascades: true              # Full pipeline (3 iterations x 5 surrogates)
+  task_cascades_guaranteed: true   # With statistical accuracy guarantees
+  task_cascades_lite: false        # Lightweight: 1 iteration, 8 surrogates
+
+  # ===================
+  # Variants
+  # ===================
+  no_filtering: true               # Surrogates on full documents
+  no_surrogates: true              # Filtering only, no surrogates
+  filtering_only: false            # Learned filtering without surrogates
+  single_iteration: false          # Single iteration with 15 surrogates
+  similarity_filtering: false      # Cosine similarity instead of learned
+
+  # ===================
+  # Baselines
+  # ===================
+  baseline: true                   # 2-model cascade (GPT-4o-mini -> GPT-4o)
+  baseline_guaranteed: false       # With accuracy guarantees
+  oracle: true                     # All to GPT-4o (cost upper bound)
+  lotus: false                     # LOTUS (requires lotus library)

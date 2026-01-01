@@ -1,0 +1,12 @@
+scratch.ipynb
+.env
+*.DS_Store
+*__pycache__/
+*.pkl
+*test.py
+data/*
+
+.old/*
+
+v5/*.pkl
+.litellm_cache*
