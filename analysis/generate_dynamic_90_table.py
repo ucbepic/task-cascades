@@ -168,26 +168,26 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
     # Methods that use repeated trials (baseline and task cascades)
     repeated_trial_methods = {
         'baseline': 'baseline',
-        'baseline_with_guarantees': 'baseline_with_guarantees', 
-        'main_greedy': 'single_iteration_agent_greedy',
-        'main_greedy_guaranteed': 'single_iteration_agent_guaranteed'
+        'baseline_guaranteed': 'baseline_guaranteed', 
+        'task_cascades': 'single_iteration',
+        'task_cascades_guaranteed': 'single_iteration_agent_guaranteed'
     }
     
     # Methods that use single experiment results (ablations)
     ablation_methods = [
-        'no_surrogate_greedy',
-        'single_iteration_agent_greedy', 
-        'no_data_filtering_greedy',
-        'simple_similarity_filtering_greedy',
-        'simple_similarity_filtering_no_surrogate_greedy',
-        'main_selectivity'
+        'no_surrogates',
+        'single_iteration', 
+        'no_filtering',
+        'naive_rag_filter',
+        'simple_similarity_filtering_no_surrogates',
+        'selectivity_ordering'
     ]
     
     # Load Oracle costs from experiment data (oracle is single trial)
     oracle_costs = {}
     for task in tasks:
         exp_data = load_experiment_data_for_ablations(task, 0.9)
-        oracle_rows = exp_data[exp_data['method'] == 'oracle_only']
+        oracle_rows = exp_data[exp_data['method'] == 'oracle']
         if not oracle_rows.empty:
             oracle_costs[task] = oracle_rows.iloc[0]['cost']
     
@@ -228,17 +228,17 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
 
     # Method display configuration
     method_rows = [
-        ("oracle_only", "Oracle Only", None),
+        ("oracle", "Oracle Only", None),
         ("baseline", "2-Model Cascade (baseline)", None),
-        ("baseline_with_guarantees", "2-Model Cascade (Guaranteed)", None),
-        ("main_greedy", "Full (Greedy)", "Full approach and variants"),
-        ("main_selectivity", "Full (Selectivity)", None),
-        ("main_greedy_guaranteed", "Full (Guaranteed)", None),
-        ("no_surrogate_greedy", "No Surrogates", "Surrogate discovery ablations"),
-        ("single_iteration_agent_greedy", "Single-Iter", None),
-        ("no_data_filtering_greedy", "No Filtering", "Document pruning ablations"),
-        ("simple_similarity_filtering_greedy", "Naive RAG Filter", None),
-        ("simple_similarity_filtering_no_surrogate_greedy", "RAG + NoSur", None),
+        ("baseline_guaranteed", "2-Model Cascade (Guaranteed)", None),
+        ("task_cascades", "Full (Greedy)", "Full approach and variants"),
+        ("selectivity_ordering", "Full (Selectivity)", None),
+        ("task_cascades_guaranteed", "Full (Guaranteed)", None),
+        ("no_surrogates", "No Surrogates", "Surrogate discovery ablations"),
+        ("single_iteration", "Single-Iter", None),
+        ("no_filtering", "No Filtering", "Document pruning ablations"),
+        ("naive_rag_filter", "Naive RAG Filter", None),
+        ("simple_similarity_filtering_no_surrogates", "RAG + NoSur", None),
     ]
     
     content = []
@@ -267,7 +267,7 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
         for task in tasks:
             display_str = "---"
             
-            if method_key == 'oracle_only':
+            if method_key == 'oracle':
                 # Use oracle cost
                 if task in oracle_costs:
                     oracle_cost = oracle_costs[task]
@@ -290,21 +290,21 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
                             success_count = stats['meets_target_count']
                             total_trials = stats['total_trials']
                     
-                    if method_key in ['baseline', 'baseline_with_guarantees']:
+                    if method_key in ['baseline', 'baseline_guaranteed']:
                         # Show absolute cost, accuracy, and success rate
                         display_str = f"${cost:.2f} ({accuracy*100:.1f}%) {success_count}/{total_trials}"
                     else:
                         # Show multiplier, accuracy, and success rate relative to baseline
-                        if method_key == 'main_greedy':
+                        if method_key == 'task_cascades':
                             # Use regular baseline as denominator
                             if task in repeated_trial_data and 'baseline' in repeated_trial_data[task]:
                                 baseline_cost = repeated_trial_data[task]['baseline'][1]
                                 multiplier = cost / baseline_cost if baseline_cost > 0 else cost
                                 display_str = f"{multiplier:.2f} ({accuracy*100:.1f}%) {success_count}/{total_trials}"
-                        elif method_key == 'main_greedy_guaranteed':
+                        elif method_key == 'task_cascades_guaranteed':
                             # Use guaranteed baseline as denominator  
-                            if task in repeated_trial_data and 'baseline_with_guarantees' in repeated_trial_data[task]:
-                                baseline_cost = repeated_trial_data[task]['baseline_with_guarantees'][1]
+                            if task in repeated_trial_data and 'baseline_guaranteed' in repeated_trial_data[task]:
+                                baseline_cost = repeated_trial_data[task]['baseline_guaranteed'][1]
                                 multiplier = cost / baseline_cost if baseline_cost > 0 else cost
                                 display_str = f"{multiplier:.2f} ({accuracy*100:.1f}%) {success_count}/{total_trials}"
                     
@@ -320,7 +320,7 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
                             cost_reduction_values.append(cost_reduction)
                     
                     # Calculate cost reduction vs baseline for task cascades (only if meets target accuracy)
-                    if accuracy >= 0.9 and method_key in ['main_greedy', 'main_greedy_guaranteed']:
+                    if accuracy >= 0.9 and method_key in ['task_cascades', 'task_cascades_guaranteed']:
                         multiplier_val = cost / baseline_cost if baseline_cost > 0 else 1.0
                         baseline_multipliers.append(multiplier_val)
                         
@@ -356,9 +356,9 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
             row_data.append(display_str)
 
         # Cost multiplier vs baseline column
-        if method_key in ['oracle_only']:
+        if method_key in ['oracle']:
             avg_display = "---"
-        elif method_key in ['baseline', 'baseline_with_guarantees']:
+        elif method_key in ['baseline', 'baseline_guaranteed']:
             avg_display = "1.00"
         else:
             if baseline_multipliers:
@@ -372,7 +372,7 @@ def generate_dynamic_90_table(target_seeds: list = [43, 44, 45]) -> str:
             avg_cost_reduction = np.mean(cost_reduction_values)
             cost_reduction_display = f"{avg_cost_reduction:.1f}%"
         else:
-            if method_key == 'oracle_only':
+            if method_key == 'oracle':
                 cost_reduction_display = "0.0%"
             else:
                 cost_reduction_display = "---"

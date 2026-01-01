@@ -65,18 +65,18 @@ def print_task_results(task: str, data: dict):
     
     # Method display names
     method_display_names = {
-        "single_iteration_agent_greedy": "🤖 Single-Shot 15 (Greedy)",
+        "single_iteration": "🤖 Single-Shot 15 (Greedy)",
         "single_iteration_agent_guaranteed": "🤖✅ Single-Shot 15 (Guaranteed)",
         "baseline": "📏 2-Model Baseline",
-        "baseline_with_guarantees": "📏✅ 2-Model Baseline (Guaranteed)"
+        "baseline_guaranteed": "📏✅ 2-Model Baseline (Guaranteed)"
     }
     
     # Sort methods for consistent display
     method_order = [
-        "single_iteration_agent_greedy",
+        "single_iteration",
         "single_iteration_agent_guaranteed", 
         "baseline",
-        "baseline_with_guarantees"
+        "baseline_guaranteed"
     ]
     
     methods_data = aggregated_stats.get("methods", {})
@@ -118,8 +118,8 @@ def print_task_results(task: str, data: dict):
     
     if len(methods_data) >= 2:
         # Compare our method vs baseline
-        if "single_iteration_agent_greedy" in methods_data and "baseline" in methods_data:
-            our_cost = methods_data["single_iteration_agent_greedy"]["cost_mean"]
+        if "single_iteration" in methods_data and "baseline" in methods_data:
+            our_cost = methods_data["single_iteration"]["cost_mean"]
             baseline_cost = methods_data["baseline"]["cost_mean"]
             improvement = (baseline_cost - our_cost) / baseline_cost * 100
             
@@ -129,12 +129,12 @@ def print_task_results(task: str, data: dict):
                 console.print(f"• ⚠️  Baseline outperforms our method by [bold red]{-improvement:.1f}%[/bold red]")
         
         # Compare guaranteed vs non-guaranteed
-        if "single_iteration_agent_greedy" in methods_data and "single_iteration_agent_guaranteed" in methods_data:
-            greedy_cost = methods_data["single_iteration_agent_greedy"]["cost_mean"]
+        if "single_iteration" in methods_data and "single_iteration_agent_guaranteed" in methods_data:
+            greedy_cost = methods_data["single_iteration"]["cost_mean"]
             guaranteed_cost = methods_data["single_iteration_agent_guaranteed"]["cost_mean"]
             overhead = (guaranteed_cost - greedy_cost) / greedy_cost * 100
             
-            greedy_success = methods_data["single_iteration_agent_greedy"]["meets_target_rate"]
+            greedy_success = methods_data["single_iteration"]["meets_target_rate"]
             guaranteed_success = methods_data["single_iteration_agent_guaranteed"]["meets_target_rate"]
             
             console.print(f"• 🛡️  Guaranteed version has [bold cyan]{overhead:.1f}%[/bold cyan] cost overhead")
@@ -158,17 +158,17 @@ def print_comparison_across_tasks(all_results: dict):
     
     # Method display names
     method_display_names = {
-        "single_iteration_agent_greedy": "🤖 Single-Shot 15 (Greedy)",
+        "single_iteration": "🤖 Single-Shot 15 (Greedy)",
         "single_iteration_agent_guaranteed": "🤖✅ Single-Shot 15 (Guaranteed)",
         "baseline": "📏 2-Model Baseline", 
-        "baseline_with_guarantees": "📏✅ 2-Model Baseline (Guaranteed)"
+        "baseline_guaranteed": "📏✅ 2-Model Baseline (Guaranteed)"
     }
     
     method_order = [
-        "single_iteration_agent_greedy",
+        "single_iteration",
         "single_iteration_agent_guaranteed",
         "baseline", 
-        "baseline_with_guarantees"
+        "baseline_guaranteed"
     ]
     
     for method in method_order:
@@ -235,7 +235,7 @@ def create_stability_box_plots(all_results: dict, output_path: str = None):
     # Focus on core comparison without guaranteed methods
     method_configs = [
         ("baseline", "blue", "2-Model Cascade"),
-        ("single_iteration_agent_greedy", "green", "Task Cascade")
+        ("single_iteration", "green", "Task Cascade")
     ]
     
     for i, task in enumerate(tasks):

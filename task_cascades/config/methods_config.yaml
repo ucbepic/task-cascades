@@ -3,25 +3,31 @@
 
 methods:
   # ===================
+  # Baselines
+  # ===================
+  oracle: true                     # All documents to GPT-4o
+  baseline: true                   # 2-Model Cascade (GPT-4o-mini -> GPT-4o)
+  baseline_guaranteed: true        # 2-Model Cascade (+G)
+
+  # ===================
   # Main Methods
   # ===================
   task_cascades: true              # Full pipeline (3 iterations x 5 surrogates)
-  task_cascades_guaranteed: true   # With statistical accuracy guarantees
-  task_cascades_lite: false        # Lightweight: 1 iteration, 8 surrogates
+  task_cascades_guaranteed: true   # Task Cascades (+G)
+  task_cascades_lite: true         # Task Cascades (Lite): 1 iteration, 8 surrogates
 
   # ===================
   # Variants
   # ===================
+  no_surrogates: true              # Learned filtering only
+  single_iteration: true           # Single iteration with 15 surrogates
   no_filtering: true               # Surrogates on full documents
-  no_surrogates: true              # Filtering only, no surrogates
-  filtering_only: false            # Learned filtering without surrogates
-  single_iteration: false          # Single iteration with 15 surrogates
-  similarity_filtering: false      # Cosine similarity instead of learned
+  naive_rag_filter: true           # Cosine similarity filtering
+  selectivity_ordering: true       # Selectivity-based ordering
+  restructure_top25: true          # Keep top-25% chunks
+  rag_no_surrogates: true          # RAG filtering without surrogates
 
   # ===================
-  # Baselines
+  # External Baselines
   # ===================
-  baseline: true                   # 2-model cascade (GPT-4o-mini -> GPT-4o)
-  baseline_guaranteed: false       # With accuracy guarantees
-  oracle: true                     # All to GPT-4o (cost upper bound)
   lotus: false                     # LOTUS (requires lotus library)

@@ -54,7 +54,7 @@ def analyze_task_dataset(task: str) -> Dict[str, Any]:
     print(f"\n📊 Analyzing task: {task}")
     
     try:
-        # Load dataset and prepare data (same as full_experiments.py)
+        # Load dataset and prepare data (same as run_experiments.py)
         df, documents = load_dataset(task)
         train_df, test_df, documents, train_indices = prepare_data(
             task, df, documents, SAMPLE_SIZE, TRAIN_SPLIT, random_seed=SEED

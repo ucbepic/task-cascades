@@ -11,7 +11,7 @@ Shreya Shankar, Sepanta Zeighami, Aditya G. Parameswaran
 ### 1. Clone and Install Dependencies
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/ucbepic/task-cascades.git
 cd task-cascades
 pip install -r requirements.txt
 ```
@@ -41,7 +41,14 @@ OPENAI_API_KEY=your_key_here
 ## Quick Start
 
 ```bash
-python task_cascades/experiments/example_run.py --task=game_review
+# Run a single experiment
+python task_cascades/experiments/run_experiments.py --task game_review
+
+# Run specific methods only
+python task_cascades/experiments/run_experiments.py --task legal_doc --methods baseline task_cascades
+
+# Use config file to select methods
+python task_cascades/experiments/run_experiments.py --task enron --methods_config task_cascades/config/methods_config.yaml
 ```
 
 ## Reproducing Paper Experiments
@@ -49,7 +56,7 @@ python task_cascades/experiments/example_run.py --task=game_review
 ### Table 2: Main Results
 
 ```bash
-bash scripts/run_all_full_experiments.sh
+bash scripts/run_all_experiments.sh
 ```
 
 ### Figure 5: Varying Target Accuracy
@@ -64,15 +71,84 @@ bash scripts/run_varying_target.sh
 bash scripts/run_all_repeated_trials.sh
 ```
 
+## Methods
+
+### Baselines
+
+| Method | Key | Description |
+|--------|-----|-------------|
+| Oracle Only | `oracle` | All documents sent to GPT-4o |
+| 2-Model Cascade | `baseline` | GPT-4o-mini → GPT-4o |
+| 2-Model Cascade (+G) | `baseline_guaranteed` | With accuracy guarantees |
+
+### Task Cascades
+
+| Method | Key | Description |
+|--------|-----|-------------|
+| **Task Cascades** | `task_cascades` | Full pipeline (3 iter × 5 surrogates) |
+| **Task Cascades (+G)** | `task_cascades_guaranteed` | With accuracy guarantees |
+| **Task Cascades (Lite)** | `task_cascades_lite` | 1 iteration, 8 surrogates |
+
+### Variants
+
+| Method | Key | Description |
+|--------|-----|-------------|
+| No Surrogates | `no_surrogates` | Learned filtering only |
+| Single-Iteration | `single_iteration` | All 15 surrogates in one iteration |
+| No Filtering | `no_filtering` | Surrogates on full documents |
+| Naive RAG Filter | `naive_rag_filter` | Cosine similarity filtering |
+| Selectivity Ordering | `selectivity_ordering` | Selectivity-based cascade ordering |
+| Restructure (Top-25%) | `restructure_top25` | Keep top-25% relevant chunks |
+| RAG + NoSur | `rag_no_surrogates` | Similarity filtering, no surrogates |
+
+## Tasks
+
+| Dataset | Key | Description |
+|---------|-----|-------------|
+| AGNEWS | `ag_news` | Classify news article summaries into one of four topics: *World*, *Sports*, *Business*, or *Science/Tech* |
+| COURT | `court_opinion` | Determine if a U.S. Supreme Court opinion reverses the lower-court ruling |
+| ENRON | `enron` | Identify emails sent by C-suite or VP-level executives in the Enron corpus |
+| FEVER | `fever` | Decide whether a natural-language claim is supported by the provided evidence snippets |
+| GAMES | `game_review` | Determine whether a review praises a different game more than the one being reviewed |
+| LEGAL | `legal_doc` | Detect covenants not to sue or IP no-challenge clauses in license agreements |
+| PUBMED | `pubmed` | Classify biomedical articles into one of six study types: *RCT*, *Observational*, *Meta-analysis*, *Bench/Lab*, *Computational*, or *Review* |
+| WIKI_TALK | `wiki_talk` | Predict whether a Wikipedia Talk-page discussion culminates in an edit revert |
+
+## Configuration
+
+Edit `task_cascades/config/methods_config.yaml`:
+
+```yaml
+methods:
+  # Baselines
+  oracle: true
+  baseline: true
+  baseline_guaranteed: true
+
+  # Task Cascades
+  task_cascades: true
+  task_cascades_guaranteed: true
+  task_cascades_lite: true
+
+  # Variants
+  no_surrogates: true
+  single_iteration: true
+  no_filtering: true
+  naive_rag_filter: true
+  selectivity_ordering: true
+  restructure_top25: true
+  rag_no_surrogates: true
+```
+
 ## Project Structure
 
 ```
 task-cascades/
 ├── task_cascades/           # Main package
-│   ├── config/              # Configuration
+│   ├── config/              # Configuration and method settings
 │   ├── data/                # Dataset loading
 │   ├── filtering/           # Document filtering
-│   ├── cascade/             # Cascade design
+│   ├── cascade/             # Cascade design and surrogate discovery
 │   ├── predictors/          # LLM wrappers
 │   ├── baselines/           # LOTUS baseline
 │   └── experiments/         # Experiment runners
@@ -82,49 +158,10 @@ task-cascades/
 └── results/                 # Output
 ```
 
-## Methods
-
-| Method | Description |
-|--------|-------------|
-| **Task Cascades** | Full pipeline: surrogates + learned filtering |
-| **Task Cascades (Guaranteed)** | With statistical accuracy guarantees |
-| **Task Cascades Lite** | Lightweight: 1 iteration, 8 surrogates |
-| No Filtering | Variant: surrogates only |
-| No Surrogates | Variant: filtering only |
-| 2-Model Baseline | GPT-4o-mini → GPT-4o cascade |
-| Oracle | All documents to GPT-4o |
-
-## Tasks
-
-| Task | Type | Description |
-|------|------|-------------|
-| `game_review` | Binary | Review mentions other games positively |
-| `legal_doc` | Binary | Covenant not to sue detection |
-| `enron` | Binary | Senior executive email |
-| `wiki_talk` | Binary | Discussion resulted in reversion |
-| `court_opinion` | Binary | Court reverses ruling |
-| `fever` | Binary | Claim supported by evidence |
-| `ag_news` | 4-class | News classification |
-| `pubmed` | 6-class | Study type classification |
-
-## Configuration
-
-Edit `task_cascades/config/methods_config.yaml` to enable/disable methods:
-
-```yaml
-methods:
-  task_cascades: true
-  task_cascades_guaranteed: true
-  no_filtering: true
-  no_surrogates: true
-  baseline: true
-  oracle: true
-```
-
 ## Cost Warning
 
-Full experiments cost ~$1,000 in OpenAI API calls. Start with a smaller sample:
+Full experiments cost ~$1,000 in OpenAI API calls. Start small:
 
 ```bash
-python task_cascades/experiments/example_run.py --task=game_review --sample_size=100
+python task_cascades/experiments/run_experiments.py --task game_review --sample_size 100
 ```

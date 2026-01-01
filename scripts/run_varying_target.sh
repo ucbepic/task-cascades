@@ -15,7 +15,7 @@ for task in "${TASKS[@]}"; do
     echo ""
     echo "Running: $task"
 
-    python task_cascades/experiments/full_experiments.py \
+    python task_cascades/experiments/run_experiments.py \
         --task "$task" \
         --sample_size $SAMPLE_SIZE \
         --seed 42 \

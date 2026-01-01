@@ -66,20 +66,20 @@ def print_task_results(task: str, data: dict):
     
     # Method display names
     method_display_names = {
-        "single_iteration_agent_greedy": "🤖 Task Cascade",
+        "single_iteration": "🤖 Task Cascade",
         "single_iteration_agent_guaranteed": "🤖✅ Task Cascade (With Guarantees)",
         "baseline": "📏 2-Model Cascade",
-        "baseline_with_guarantees": "📏✅ 2-Model Cascade (with Guarantees)",
-        "oracle_only": "🔮 Oracle Only"
+        "baseline_guaranteed": "📏✅ 2-Model Cascade (with Guarantees)",
+        "oracle": "🔮 Oracle Only"
     }
     
     # Sort methods for consistent display
     method_order = [
-        "single_iteration_agent_greedy",
+        "single_iteration",
         "single_iteration_agent_guaranteed", 
         "baseline",
-        "baseline_with_guarantees",
-        "oracle_only"
+        "baseline_guaranteed",
+        "oracle"
     ]
     
     methods_data = aggregated_stats.get("methods", {})
@@ -127,7 +127,7 @@ def print_task_results(task: str, data: dict):
         # Performance trends across target accuracies
         console.print("• 📊 Performance trends:")
         
-        for method in ["single_iteration_agent_greedy", "baseline"]:
+        for method in ["single_iteration", "baseline"]:
             if method in methods_data:
                 costs = methods_data[method]["costs"]
                 cost_reductions = methods_data[method]["cost_reductions"]
@@ -148,7 +148,7 @@ def print_task_results(task: str, data: dict):
             
             highest_idx = target_accuracies.index(highest_target)
             
-            for method in ["single_iteration_agent_greedy", "baseline"]:
+            for method in ["single_iteration", "baseline"]:
                 if method in methods_data:
                     stats = methods_data[method]
                     if highest_idx < len(stats["costs"]):
@@ -179,19 +179,19 @@ def print_comparison_across_tasks(all_results: dict):
     
     # Method display names
     method_display_names = {
-        "single_iteration_agent_greedy": "🤖 Task Cascade",
+        "single_iteration": "🤖 Task Cascade",
         "single_iteration_agent_guaranteed": "🤖✅ Task Cascade (With Guarantees)",
         "baseline": "📏 2-Model Cascade", 
-        "baseline_with_guarantees": "📏✅ 2-Model Cascade (with Guarantees)",
-        "oracle_only": "🔮 Oracle Only"
+        "baseline_guaranteed": "📏✅ 2-Model Cascade (with Guarantees)",
+        "oracle": "🔮 Oracle Only"
     }
     
     method_order = [
-        "single_iteration_agent_greedy",
+        "single_iteration",
         "single_iteration_agent_guaranteed",
         "baseline", 
-        "baseline_with_guarantees",
-        "oracle_only"
+        "baseline_guaranteed",
+        "oracle"
     ]
     
     for method in method_order:
@@ -256,10 +256,10 @@ def create_accuracy_vs_cost_plot(all_results: dict, output_path: str = None):
     # Method configurations: (method_key, color, marker, label)
     method_configs = [
         ("baseline", "blue", "o", "2-Model Cascade"),
-        ("baseline_with_guarantees", "blue", "^", "2-Model Cascade (with Guarantees)"),
-        ("single_iteration_agent_greedy", "green", "o", "Task Cascade"),
+        ("baseline_guaranteed", "blue", "^", "2-Model Cascade (with Guarantees)"),
+        ("single_iteration", "green", "o", "Task Cascade"),
         ("single_iteration_agent_guaranteed", "green", "^", "Task Cascade (With Guarantees)"),
-        ("oracle_only", "gold", "*", "Oracle")
+        ("oracle", "gold", "*", "Oracle")
     ]
     
     for i, task in enumerate(tasks):

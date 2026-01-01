@@ -1,213 +1,495 @@
-"""Main experiment runner class with improved structure."""
+"""Reusable experiment runner for Task Cascades experiments."""
 
+import os
+import pickle
 import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Callable, Any
 import pandas as pd
-from typing import Dict, List, Optional, Any, Tuple
 from rich.console import Console
-from rich.table import Table
 
-from .config import ExperimentConfig, MethodConfig
-from .cache_manager import CacheManager
-from .create_dfs import prepare_data, load_dataset, apply_filtering_calibrator_to_dataframe
-from .train_classifier_for_filtering import train_data_filtering, simple_similarity_data_filtering, position_based_data_filtering
-from .data_filtering_utils import chunk_and_get_confidences
-from .calibrators import train_filtering_calibrator
-from .find_surrogates import find_surrogates
-from .apply_trained_cascade import apply_cascade, train_and_apply_baseline_cascade, train_and_apply_lotus_cascade
-from .predictors import PROMPT_TO_TASK_TYPE_DICT, TASK_PROMPT_DICT
+from task_cascades.config.config import ExperimentConfig, MethodConfig
+from task_cascades.data.create_dfs import (
+    prepare_data, load_dataset, apply_filtering_calibrator_to_dataframe
+)
+from task_cascades.filtering.train_classifier_for_filtering import (
+    train_data_filtering, simple_similarity_data_filtering, position_based_data_filtering
+)
+from task_cascades.filtering.data_filtering_utils import chunk_and_get_confidences
+from task_cascades.filtering.calibrators import train_filtering_calibrator
+from task_cascades.cascade.find_surrogates import find_surrogates
+from task_cascades.cascade.apply_trained_cascade import apply_cascade, train_and_apply_baseline_cascade
+from task_cascades.predictors.predictors import (
+    PROMPT_TO_TASK_TYPE_DICT, TASK_PROMPT_DICT, BASELINE_PREDICTOR, ORACLE_PREDICTOR, PREDICTORS
+)
+from task_cascades.config.consts import CANDIDATE_FRACTIONS
 
+console = Console()
+
+
+@dataclass
 class ExperimentRunner:
-    """Main class for running cascade experiments."""
-    
-    def __init__(self, config: ExperimentConfig = None, method_config: MethodConfig = None):
-        self.config = config or ExperimentConfig()
-        self.method_config = method_config or MethodConfig()
-        self.cache_manager = CacheManager(self.config.CACHE_DIR)
-        self.console = Console()
-        self.config.ensure_directories()
-    
-    def setup_data(self, task: str, sample_size: int, train_split: float, seed: int, skip_cache: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, List, List]:
-        """Set up and load experiment data."""
-        cache_path = self.cache_manager.get_cache_path(task, sample_size, seed)
-        
-        if not skip_cache and self.cache_manager.cache_exists(cache_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Data from cache")
-            cached_data = self.cache_manager.load_from_cache(cache_path)
-            return cached_data['train_df'], cached_data['test_df'], cached_data['documents'], cached_data['train_indices']
+    """Reusable experiment runner that handles data prep, method execution, and caching."""
+
+    task: str
+    sample_size: int = 1000
+    train_split: float = 0.2
+    seed: int = 42
+    cache_dir: str = "cache"
+    results_dir: str = "results"
+    skip_cache: bool = False
+
+    # Processed data (populated by prepare())
+    train_df: pd.DataFrame = field(default=None, repr=False)
+    test_df: pd.DataFrame = field(default=None, repr=False)
+    train_df_filtered: pd.DataFrame = field(default=None, repr=False)
+    test_df_filtered: pd.DataFrame = field(default=None, repr=False)
+    train_df_no_filtering: pd.DataFrame = field(default=None, repr=False)
+    test_df_no_filtering: pd.DataFrame = field(default=None, repr=False)
+    oracle_cost: float = field(default=0.0)
+
+    # Simple similarity filtered data (lazy loaded)
+    train_df_simple_filtered: pd.DataFrame = field(default=None, repr=False)
+    test_df_simple_filtered: pd.DataFrame = field(default=None, repr=False)
+
+    # Position filtered data (lazy loaded)
+    train_df_position_filtered: pd.DataFrame = field(default=None, repr=False)
+    test_df_position_filtered: pd.DataFrame = field(default=None, repr=False)
+
+    # Config
+    config: ExperimentConfig = field(default_factory=ExperimentConfig)
+
+    def __post_init__(self):
+        os.makedirs(self.cache_dir, exist_ok=True)
+        os.makedirs(self.results_dir, exist_ok=True)
+
+    def _cache_path(self, suffix: str = "") -> str:
+        return os.path.join(self.cache_dir, f"{self.task}_{self.sample_size}_seed_{self.seed}{suffix}_cache.pkl")
+
+    def _load_cache(self, path: str) -> Optional[dict]:
+        if not self.skip_cache and os.path.exists(path):
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        return None
+
+    def _save_cache(self, data: dict, path: str):
+        with open(path, 'wb') as f:
+            pickle.dump(data, f)
+
+    def prepare(self) -> "ExperimentRunner":
+        """Load and preprocess data. Returns self for chaining."""
+
+        # Load raw data
+        cache_path = self._cache_path()
+        cached = self._load_cache(cache_path)
+
+        if cached:
+            console.print("[bold cyan]📂 Loading[/bold cyan]: Data from cache")
+            self.train_df = cached['train_df']
+            self.test_df = cached['test_df']
         else:
-            self.console.print("[bold magenta]🔮 Preparing[/bold magenta]: Loading dataset and preparing data...")
-            df, documents = load_dataset(task)
-            train_df, test_df, documents, train_indices = prepare_data(
-                task, df, documents, sample_size, train_split, random_seed=seed
+            console.print("[bold magenta]🔮 Preparing[/bold magenta]: Loading dataset...")
+            df, documents = load_dataset(self.task)
+            self.train_df, self.test_df, documents, _ = prepare_data(
+                self.task, df, documents, self.sample_size, self.train_split, random_seed=self.seed
             )
-            
-            self.cache_manager.save_to_cache({
-                'train_df': train_df,
-                'test_df': test_df,
-                'documents': documents,
-                'train_indices': train_indices
-            }, cache_path)
-            
-            return train_df, test_df, documents, train_indices
-    
-    def setup_classifier(self, task: str, train_df: pd.DataFrame, seed: int, skip_cache: bool = False) -> Tuple[Any, int]:
-        """Set up data filtering classifier."""
-        classifier_path = self.cache_manager.get_classifier_path(task, seed)
-        
-        if not skip_cache and self.cache_manager.cache_exists(classifier_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Data filtering classifier from cache")
-            return self.cache_manager.load_classifier(task, seed)
+            self._save_cache({'train_df': self.train_df, 'test_df': self.test_df, 'documents': documents}, cache_path)
+
+        # Train classifier
+        classifier_path = os.path.join(self.cache_dir, f"{self.task}_seed_{self.seed}_classifier.pkl")
+        cached_classifier = self._load_cache(classifier_path)
+
+        if cached_classifier:
+            console.print("[bold cyan]📂 Loading[/bold cyan]: Classifier from cache")
+            classifier, chunk_size = cached_classifier['classifier'], cached_classifier['chunk_size']
         else:
-            self.console.print("[bold magenta]🔮 Training[/bold magenta]: Training data filtering classifier...")
-            classifier, chunk_size = train_data_filtering(task, train_df)
-            self.cache_manager.save_classifier(task, seed, classifier, chunk_size)
-            return classifier, chunk_size
-    
-    def setup_chunked_data(self, task: str, sample_size: int, seed: int, train_df: pd.DataFrame, test_df: pd.DataFrame, 
-                          classifier: Any, chunk_size: int, skip_cache: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Set up chunked data with confidences."""
-        chunked_cache_path = self.cache_manager.get_cache_path(task, sample_size, seed, suffix="_chunked")
-        
-        if not skip_cache and self.cache_manager.cache_exists(chunked_cache_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Chunked documents with confidences from cache")
-            cached_chunked_data = self.cache_manager.load_from_cache(chunked_cache_path)
-            return cached_chunked_data['train_df'], cached_chunked_data['test_df']
+            console.print("[bold magenta]🔮 Training[/bold magenta]: Data filtering classifier...")
+            classifier, chunk_size = train_data_filtering(self.task, self.train_df)
+            self._save_cache({'classifier': classifier, 'chunk_size': chunk_size}, classifier_path)
+
+        # Chunk data
+        chunked_cache_path = self._cache_path("_chunked")
+        cached_chunked = self._load_cache(chunked_cache_path)
+
+        if cached_chunked:
+            console.print("[bold cyan]📂 Loading[/bold cyan]: Chunked data from cache")
+            train_df_chunked = cached_chunked['train_df']
+            test_df_chunked = cached_chunked['test_df']
         else:
-            self.console.print("[bold blue]🔍 Processing[/bold blue]: Chunking documents and calculating confidences...")
-            train_df_chunked = chunk_and_get_confidences(train_df, chunk_size, classifier)
-            test_df_chunked = chunk_and_get_confidences(test_df, chunk_size, classifier)
-            self.cache_manager.save_to_cache({
-                'train_df': train_df_chunked,
-                'test_df': test_df_chunked
-            }, chunked_cache_path)
-            return train_df_chunked, test_df_chunked
-    
-    def setup_filtered_data(self, task: str, sample_size: int, seed: int, train_df_chunked: pd.DataFrame, 
-                           test_df_chunked: pd.DataFrame, target_accuracy: float, skip_cache: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, Any]:
-        """Set up filtered data with calibrator."""
-        # Use first target accuracy for backward compatibility
-        filtering_calibrator_path = self.cache_manager.get_filtering_calibrator_path(task, seed, target_accuracy)
-        
-        if not skip_cache and self.cache_manager.cache_exists(filtering_calibrator_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Data filtering calibrator from cache")
-            filtering_calibrator = self.cache_manager.load_filtering_calibrator(task, seed, target_accuracy)
+            console.print("[bold blue]🔍 Processing[/bold blue]: Chunking documents...")
+            train_df_chunked = chunk_and_get_confidences(self.train_df, chunk_size, classifier)
+            test_df_chunked = chunk_and_get_confidences(self.test_df, chunk_size, classifier)
+            self._save_cache({'train_df': train_df_chunked, 'test_df': test_df_chunked}, chunked_cache_path)
+
+        # Train calibrator
+        calibrator_path = os.path.join(self.cache_dir, f"{self.task}_seed_{self.seed}_filtering_calibrator.pkl")
+        cached_calibrator = self._load_cache(calibrator_path)
+
+        if cached_calibrator:
+            console.print("[bold cyan]📂 Loading[/bold cyan]: Calibrator from cache")
+            filtering_calibrator = cached_calibrator
         else:
-            self.console.print("[bold magenta]🔮 Training[/bold magenta]: Data filtering calibrator...")
-            filtering_calibrator = train_filtering_calibrator(train_df_chunked, task)
-            self.cache_manager.save_filtering_calibrator(task, seed, target_accuracy, filtering_calibrator)
-        
-        filtered_cache_path = self.cache_manager.get_cache_path(task, sample_size, seed, suffix="_filtered")
-        if not skip_cache and self.cache_manager.cache_exists(filtered_cache_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Filtered dataframes from cache")
-            cached = self.cache_manager.load_from_cache(filtered_cache_path)
-            train_df_filtered = cached['train_df']
-            test_df_filtered = cached['test_df']
+            console.print("[bold magenta]🔮 Training[/bold magenta]: Filtering calibrator...")
+            filtering_calibrator = train_filtering_calibrator(train_df_chunked, self.task)
+            self._save_cache(filtering_calibrator, calibrator_path)
+
+        # Apply calibrator
+        filtered_cache_path = self._cache_path("_filtered")
+        cached_filtered = self._load_cache(filtered_cache_path)
+
+        if cached_filtered:
+            console.print("[bold cyan]📂 Loading[/bold cyan]: Filtered data from cache")
+            self.train_df_filtered = cached_filtered['train_df']
+            self.test_df_filtered = cached_filtered['test_df']
         else:
-            self.console.print("[bold blue]🔍 Processing[/bold blue]: Applying filtering calibrator...")
-            train_df_filtered = apply_filtering_calibrator_to_dataframe(train_df_chunked, filtering_calibrator)
-            test_df_filtered = apply_filtering_calibrator_to_dataframe(test_df_chunked, filtering_calibrator)
-            self.cache_manager.save_to_cache({'train_df': train_df_filtered, 'test_df': test_df_filtered}, filtered_cache_path)
-        
-        return train_df_filtered, test_df_filtered, filtering_calibrator
-    
-    def create_no_data_filtering_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Create a version of the dataframe with no data filtering applied."""
-        df_no_filtering = df.copy()
-        df_no_filtering['filtered_text'] = df_no_filtering['text']
-        df_no_filtering['fraction'] = 1.0
-        return df_no_filtering
-    
-    def run_baseline_methods(self, train_df_filtered: pd.DataFrame, test_df_filtered: pd.DataFrame, 
-                           target_accuracy: float, task: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
-        """Run baseline and lotus cascade methods."""
-        self.console.print("\n[bold yellow]📏 BASELINE METHODS: Traditional Approaches[/bold yellow]")
+            console.print("[bold blue]🔍 Processing[/bold blue]: Applying calibrator...")
+            self.train_df_filtered = apply_filtering_calibrator_to_dataframe(train_df_chunked, filtering_calibrator)
+            self.test_df_filtered = apply_filtering_calibrator_to_dataframe(test_df_chunked, filtering_calibrator)
+            self._save_cache({'train_df': self.train_df_filtered, 'test_df': self.test_df_filtered}, filtered_cache_path)
+
+        # No-filtering versions
+        self.train_df_no_filtering = self.train_df.copy()
+        self.train_df_no_filtering['filtered_text'] = self.train_df_no_filtering['text']
+        self.train_df_no_filtering['fraction'] = 1.0
+
+        self.test_df_no_filtering = self.test_df.copy()
+        self.test_df_no_filtering['filtered_text'] = self.test_df_no_filtering['text']
+        self.test_df_no_filtering['fraction'] = 1.0
+
+        # Oracle cost
+        self.oracle_cost = self.test_df.drop_duplicates(subset=["uuid"])["oracle_cost"].sum()
+
+        return self
+
+    def prepare_simple_similarity(self) -> "ExperimentRunner":
+        """Prepare simple similarity filtered data (lazy)."""
+        if self.train_df_simple_filtered is not None:
+            return self
+
+        console.print("[bold yellow]📐 Preparing[/bold yellow]: Simple similarity filtering...")
+        classifier, chunk_size = simple_similarity_data_filtering(self.task, self.train_df)
+
+        cache_path = self._cache_path("_simple_filtered")
+        cached = self._load_cache(cache_path)
+
+        if cached:
+            self.train_df_simple_filtered = cached['train_df']
+            self.test_df_simple_filtered = cached['test_df']
+        else:
+            train_chunked = chunk_and_get_confidences(self.train_df, chunk_size, classifier)
+            test_chunked = chunk_and_get_confidences(self.test_df, chunk_size, classifier)
+            calibrator = train_filtering_calibrator(train_chunked, self.task)
+            self.train_df_simple_filtered = apply_filtering_calibrator_to_dataframe(train_chunked, calibrator)
+            self.test_df_simple_filtered = apply_filtering_calibrator_to_dataframe(test_chunked, calibrator)
+            self._save_cache({'train_df': self.train_df_simple_filtered, 'test_df': self.test_df_simple_filtered}, cache_path)
+
+        return self
+
+    def prepare_position_based(self) -> "ExperimentRunner":
+        """Prepare position-based filtered data (lazy)."""
+        if self.train_df_position_filtered is not None:
+            return self
+
+        console.print("[bold red]📍 Preparing[/bold red]: Position-based filtering...")
+        classifier, chunk_size = position_based_data_filtering(self.task, self.train_df)
+
+        cache_path = self._cache_path("_position_filtered")
+        cached = self._load_cache(cache_path)
+
+        if cached:
+            self.train_df_position_filtered = cached['train_df']
+            self.test_df_position_filtered = cached['test_df']
+        else:
+            train_chunked = chunk_and_get_confidences(self.train_df, chunk_size, classifier)
+            test_chunked = chunk_and_get_confidences(self.test_df, chunk_size, classifier)
+            calibrator = train_filtering_calibrator(train_chunked, self.task)
+            self.train_df_position_filtered = apply_filtering_calibrator_to_dataframe(train_chunked, calibrator)
+            self.test_df_position_filtered = apply_filtering_calibrator_to_dataframe(test_chunked, calibrator)
+            self._save_cache({'train_df': self.train_df_position_filtered, 'test_df': self.test_df_position_filtered}, cache_path)
+
+        return self
+
+    def run_method(self, method: str, target_accuracy: float) -> Dict[str, Any]:
+        """Run a single method and return results."""
+
+        task_type = PROMPT_TO_TASK_TYPE_DICT[self.task]
         start_time = time.perf_counter()
-        
-        # Compute baseline cascade
-        self.console.print("[bold magenta]🔮 Computing[/bold magenta]: Baseline cascade...")
-        baseline_results, baseline_results_guaranteed = train_and_apply_baseline_cascade(
-            train_df_filtered, test_df_filtered, target_accuracy, task
-        )
-        baseline_results["runtime"] = time.perf_counter() - start_time
-        baseline_results_guaranteed["runtime"] = baseline_results["runtime"]
-        
-        # Compute lotus cascade
-        start_time = time.perf_counter()
-        self.console.print("[bold magenta]🔮 Computing[/bold magenta]: Lotus cascade...")
-        lotus_results = train_and_apply_lotus_cascade(
-            train_df_filtered, test_df_filtered, target_accuracy, task
-        )
-        lotus_results["runtime"] = time.perf_counter() - start_time
-        
-        # Print results
-        self.console.print(
-            f"[bold cyan]Baseline cost:[/bold cyan] [green]{baseline_results['total_cost']:.4f}[/green]    "
-            f"[bold cyan]Baseline accuracy:[/bold cyan] [yellow]{baseline_results['overall_accuracy']:.4f}[/yellow]"
-        )
-        self.console.print(
-            f"[bold cyan]Baseline guaranteed cost:[/bold cyan] [green]{baseline_results_guaranteed['total_cost']:.4f}[/green]    "
-            f"[bold cyan]Baseline guaranteed accuracy:[/bold cyan] [yellow]{baseline_results_guaranteed['overall_accuracy']:.4f}[/yellow]"
-        )
-        self.console.print(
-            f"[bold cyan]Lotus cost:[/bold cyan] [green]{lotus_results['total_cost']:.4f}[/green]    "
-            f"[bold cyan]Lotus accuracy:[/bold cyan] [yellow]{lotus_results['overall_accuracy']:.4f}[/yellow]"
-        )
-        
-        return baseline_results, baseline_results_guaranteed, lotus_results
-    
-    def run_main_cascade_methods(self, train_df_filtered: pd.DataFrame, test_df_filtered: pd.DataFrame,
-                               task: str, target_accuracy: float, seed: int, skip_cache: bool = False) -> Dict[str, Any]:
-        """Run main cascade methods with the updated configuration."""
-        self.console.print(f"\n[bold green]🔄 MAIN METHODS: Full Pipeline with Surrogates + Data Filtering (Target: {target_accuracy})[/bold green]")
-        
-        # Load or find surrogates for main methods
-        cascade_results_path = self.cache_manager.get_cascade_results_path(task, seed, target_accuracy)
-        if not skip_cache and self.cache_manager.cache_exists(cascade_results_path):
-            self.console.print("[bold cyan]📂 Loading[/bold cyan]: Cascade results from cache")
-            cascade_results = self.cache_manager.load_cascade_results(task, seed, target_accuracy)
-        else:
-            self.console.print("[bold magenta]🔮 Discovering[/bold magenta]: Finding surrogates for cascade...")
-            # Updated to use 3 iterations with 5 surrogates per iteration
-            cascade_results = find_surrogates(
-                train_df_filtered, 
-                task, 
-                target_accuracy, 
-                guarantee_accuracy=True, 
-                num_iterations=self.config.NUM_ITERATIONS,  # 3 iterations
-                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION  # 5 surrogates per iteration
+
+        if method == "oracle":
+            return {
+                "overall_accuracy": 1.0,
+                "total_cost": self.oracle_cost,
+                "stage_usage": {"oracle": 1.0},
+                "runtime": 0.0
+            }
+
+        elif method == "baseline":
+            baseline, _ = train_and_apply_baseline_cascade(
+                self.train_df_filtered, self.test_df_filtered, target_accuracy, self.task
             )
-            self.cache_manager.save_cascade_results(task, seed, target_accuracy, cascade_results)
-        
-        return cascade_results
-    
-    def run_no_data_filtering_method(self, train_df: pd.DataFrame, test_df: pd.DataFrame, 
-                                   task: str, target_accuracy: float) -> Dict[str, Any]:
-        """Run ablation without data filtering."""
-        self.console.print("\n[bold orange1]📄 ABLATION 1: No Data Filtering (Surrogates on Full Documents)[/bold orange1]")
-        start_time = time.perf_counter()
-        
-        # Create no-filtering dataframes
-        train_df_no_filtering = self.create_no_data_filtering_df(train_df)
-        test_df_no_filtering = self.create_no_data_filtering_df(test_df)
-        
-        self.console.print("[bold magenta]🔮 Discovering[/bold magenta]: Finding surrogates without data filtering...")
-        no_filtering_cascade_results = find_surrogates(
-            train_df_no_filtering, 
-            task, 
-            target_accuracy, 
-            include_selectivity=False, 
-            num_iterations=self.config.NUM_ITERATIONS,
-            num_surrogate_requests=self.config.SURROGATES_PER_ITERATION
+            baseline["runtime"] = time.perf_counter() - start_time
+            return baseline
+
+        elif method == "baseline_guaranteed":
+            _, baseline_g = train_and_apply_baseline_cascade(
+                self.train_df_filtered, self.test_df_filtered, target_accuracy, self.task
+            )
+            baseline_g["runtime"] = time.perf_counter() - start_time
+            return baseline_g
+
+        elif method == "task_cascades":
+            cascade = find_surrogates(
+                self.train_df_filtered, self.task, target_accuracy,
+                num_iterations=self.config.NUM_ITERATIONS,
+                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION
+            )
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "task_cascades_guaranteed":
+            cascade = find_surrogates(
+                self.train_df_filtered, self.task, target_accuracy,
+                num_iterations=self.config.NUM_ITERATIONS,
+                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION,
+                guarantee_accuracy=True
+            )
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy_guaranteed"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy_guaranteed"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "task_cascades_lite":
+            cascade = find_surrogates(
+                self.train_df_filtered, self.task, target_accuracy,
+                num_iterations=1, num_surrogate_requests=8,
+                provide_feedback=True, include_selectivity=False,
+                proxy_predictor_only=True  # TC Lite: surrogates use only gpt-4o-mini
+            )
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "selectivity_ordering":
+            cascade = find_surrogates(
+                self.train_df_filtered, self.task, target_accuracy,
+                num_iterations=self.config.NUM_ITERATIONS,
+                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION,
+                include_selectivity=True
+            )
+            result = apply_cascade(
+                self.test_df_filtered, cascade["selectivity"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["selectivity"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "no_filtering":
+            cascade = find_surrogates(
+                self.train_df_no_filtering, self.task, target_accuracy,
+                num_iterations=self.config.NUM_ITERATIONS,
+                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION,
+                include_selectivity=False
+            )
+            result = apply_cascade(
+                self.test_df_no_filtering, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "no_surrogates":
+            cascade = self._create_no_surrogate_cascade(self.train_df_filtered, target_accuracy)
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "single_iteration":
+            cascade = find_surrogates(
+                self.train_df_filtered, self.task, target_accuracy,
+                num_iterations=1, provide_feedback=False, include_selectivity=False
+            )
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "naive_rag_filter":
+            self.prepare_simple_similarity()
+            cascade = find_surrogates(
+                self.train_df_simple_filtered, self.task, target_accuracy,
+                num_iterations=self.config.NUM_ITERATIONS,
+                num_surrogate_requests=self.config.SURROGATES_PER_ITERATION,
+                include_selectivity=False
+            )
+            result = apply_cascade(
+                self.test_df_simple_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "restructure_top25":
+            cascade = self._create_no_surrogate_cascade(self.train_df_filtered, target_accuracy)
+            result = apply_cascade(
+                self.test_df_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "rag_no_surrogates":
+            self.prepare_simple_similarity()
+            cascade = self._create_no_surrogate_cascade(self.train_df_simple_filtered, target_accuracy)
+            result = apply_cascade(
+                self.test_df_simple_filtered, cascade["greedy"]["ordering"],
+                cascade["surrogate_to_prompt"], cascade["greedy"]["thresholds"], task_type
+            )
+            result["runtime"] = time.perf_counter() - start_time
+            return result
+
+        elif method == "lotus":
+            return self._run_lotus(target_accuracy)
+
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+    def _create_no_surrogate_cascade(self, train_df: pd.DataFrame, target_accuracy: float) -> dict:
+        """Create a cascade with only the baseline task (no surrogates)."""
+        from task_cascades.cascade.cascade_utils import design_cascade_optimal_greedy
+        from task_cascades.predictors.predictors import run_predictor_and_get_row_copies
+
+        all_executions = []
+        task_prompt = TASK_PROMPT_DICT[self.task]
+        task_type = PROMPT_TO_TASK_TYPE_DICT[self.task]
+
+        baseline_results = run_predictor_and_get_row_copies(
+            BASELINE_PREDICTOR, task_prompt, train_df, "s1", task_type=task_type
         )
-        
-        self.console.print("[bold magenta]🔮 Testing[/bold magenta]: Applying no-filtering cascade to test set...")
-        no_filtering_results = apply_cascade(
-            test_df_no_filtering, 
-            no_filtering_cascade_results["greedy"]["ordering"], 
-            no_filtering_cascade_results["surrogate_to_prompt"], 
-            no_filtering_cascade_results["greedy"]["thresholds"], 
-            PROMPT_TO_TASK_TYPE_DICT[task]
+        oracle_results = run_predictor_and_get_row_copies(
+            ORACLE_PREDICTOR, task_prompt, train_df, "s1", task_type=task_type
         )
-        no_filtering_results["runtime"] = time.perf_counter() - start_time
-        
-        return no_filtering_results
+
+        all_executions.extend(baseline_results)
+        all_executions.extend(oracle_results)
+        all_executions_df = pd.DataFrame(all_executions)
+
+        all_candidates = []
+        for doc_fraction in CANDIDATE_FRACTIONS:
+            for predictor in PREDICTORS:
+                if predictor == ORACLE_PREDICTOR and doc_fraction == 1.0:
+                    continue
+                all_candidates.append(("s1", predictor, doc_fraction))
+
+        cascade_greedy = design_cascade_optimal_greedy(all_executions_df, all_candidates, target_accuracy, self.task)
+        surrogate_to_prompt = {"s1": task_prompt}
+
+        return {
+            "greedy": {**cascade_greedy, "surrogate_to_prompt": surrogate_to_prompt},
+            "surrogate_to_prompt": surrogate_to_prompt
+        }
+
+    def _run_lotus(self, target_accuracy: float) -> Dict[str, Any]:
+        """Run LOTUS baseline."""
+        try:
+            from task_cascades.baselines.lotus import (
+                configure_lotus_models, label_documents_with_oracle,
+                run_lotus_binary, run_lotus_ag_news_ovr,
+                monkey_patch_lotus_logprobs_assert, BINARY_TASKS, MULTICLASS_TASKS
+            )
+
+            monkey_patch_lotus_logprobs_assert()
+            configure_lotus_models()
+
+            test_df_lotus = self.test_df.drop_duplicates(subset=["uuid"]).copy()
+            labeled_df, _ = label_documents_with_oracle(test_df_lotus, self.task)
+
+            if self.task in BINARY_TASKS:
+                results = run_lotus_binary(
+                    labeled_df, self.task,
+                    recall_targets=[target_accuracy],
+                    precision_targets=[target_accuracy],
+                    oracle_total_cost=self.oracle_cost
+                )
+            elif self.task in MULTICLASS_TASKS:
+                results = run_lotus_ag_news_ovr(
+                    labeled_df,
+                    recall_targets=[target_accuracy],
+                    precision_targets=[target_accuracy],
+                    oracle_total_cost=self.oracle_cost
+                )
+            else:
+                return {"error": f"LOTUS not supported for task {self.task}"}
+
+            if (target_accuracy, target_accuracy) in results:
+                point = results[(target_accuracy, target_accuracy)]
+                return {
+                    "overall_accuracy": point["accuracy"],
+                    "total_cost": point["cost"],
+                    "stage_usage": {"lotus": 1.0}
+                }
+            return {"error": "No results for target accuracy"}
+
+        except ImportError as e:
+            return {"error": f"LOTUS not available: {e}"}
+        except Exception as e:
+            return {"error": f"LOTUS failed: {e}"}
+
+    def run_all(self, methods: List[str], target_accuracy: float) -> Dict[str, Any]:
+        """Run all specified methods and return results dict."""
+        results = {}
+        for method in methods:
+            console.print(f"[bold]Running {method}...[/bold]")
+            try:
+                results[method] = self.run_method(method, target_accuracy)
+                if "overall_accuracy" in results[method]:
+                    console.print(f"  ✓ {method}: accuracy={results[method]['overall_accuracy']:.4f}, cost={results[method]['total_cost']:.4f}")
+            except Exception as e:
+                console.print(f"  ✗ {method} failed: {e}")
+                results[method] = {"error": str(e)}
+        return results
+
+    def save_results(self, results: Dict[str, Any], target_accuracy: float) -> str:
+        """Save results to file and return path."""
+        import pandas as pd
+
+        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        results_path = os.path.join(
+            self.results_dir,
+            f"{self.task}_seed_{self.seed}_target_{target_accuracy}_{timestamp}.pkl"
+        )
+
+        full_results = {
+            "task": self.task,
+            "sample_size": self.sample_size,
+            "seed": self.seed,
+            "target_accuracy": target_accuracy,
+            "oracle_cost": self.oracle_cost,
+            "methods": results
+        }
+
+        with open(results_path, 'wb') as f:
+            pickle.dump(full_results, f)
+
+        # Also save latest
+        latest_path = os.path.join(
+            self.results_dir,
+            f"{self.task}_seed_{self.seed}_target_{target_accuracy}_latest.pkl"
+        )
+        with open(latest_path, 'wb') as f:
+            pickle.dump(full_results, f)
+
+        return results_path

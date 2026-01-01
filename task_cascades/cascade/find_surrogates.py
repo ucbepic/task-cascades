@@ -488,10 +488,11 @@ def find_surrogates(
     provide_feedback: bool = True,
     num_surrogate_requests: int = 5,
     guarantee_accuracy: bool = False,
+    proxy_predictor_only: bool = False,
 ) -> Dict:
     """
     Train and save predicates using an iterative agent-based approach with message history.
-    
+
     Args:
         train_df: DataFrame containing training documents
         task: The classification task
@@ -502,7 +503,10 @@ def find_surrogates(
         provide_feedback: Whether to provide feedback in iterations (default: True)
         num_surrogate_requests: Number of surrogates to request from agent (default: 5)
         guarantee_accuracy: Whether to guarantee accuracy in the cascade (default: False)
-    
+        proxy_predictor_only: If True, only use proxy predictor (gpt-4o-mini) for generated
+                             surrogates, no oracle (gpt-4o) tasks. The original task (s1)
+                             always uses both. Used for TC Lite mode. (default: False)
+
     Returns:
         Dictionary containing the best cascade results across all iterations
     """
@@ -530,12 +534,17 @@ def find_surrogates(
     def run_predictor_task(predictor, prompt, df, surrogate_name):
         return run_predictor_and_get_row_copies(predictor, prompt, df, surrogate_name, task_type=PROMPT_TO_TASK_TYPE_DICT[task])
     
-    # Run initial baseline and oracle predictors in parallel
+    # For the original task (s1), always use both baseline and oracle
+    # proxy_predictor_only only affects generated surrogates
+    if proxy_predictor_only:
+        console.print(f"[bold yellow]Proxy-only mode: generated surrogates will only use {BASELINE_PREDICTOR}[/bold yellow]")
+
+    # Run initial baseline and oracle predictors in parallel (always both for s1)
     prediction_tasks = [
         (BASELINE_PREDICTOR, task_prompt, train_data_df, "s1"),  # Baseline
-        (ORACLE_PREDICTOR, task_prompt, train_data_df, "s1"),    # Oracle
+        (ORACLE_PREDICTOR, task_prompt, train_data_df, "s1"),    # Oracle (always needed for s1)
     ]
-    
+
     console.print(f"[bold cyan]Running initial predictors in parallel...[/bold cyan]")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(
@@ -550,7 +559,7 @@ def find_surrogates(
     # Initialize all_executions_df with baseline and oracle results
     all_executions_df = pd.DataFrame(all_executions)
     
-    # Create initial candidates from s1
+    # Create initial candidates from s1 (always both predictors for the original task)
     for doc_fraction in CANDIDATE_FRACTIONS:
         for predictor in PREDICTORS:
             if predictor == ORACLE_PREDICTOR and doc_fraction == 1.0:
@@ -697,23 +706,24 @@ No bolds or italics around the PROMPT or RATIONALE, since we will be parsing wit
             console.print(f"[cyan]Preparing predicate {i+1}/{len(predicate_proposals)}: {surrogate_name}[/cyan]")
             iteration_predicates.append((surrogate_name, predicate))
 
-            # Subset train_data_df to only include the min doc fraction
-            train_data_df_subset_min_doc_fraction = train_data_df[train_data_df["fraction"] == min(CANDIDATE_FRACTIONS)]
-            
             # Add all prediction tasks for this predicate
-            all_new_prediction_tasks.extend([
-                (BASELINE_PREDICTOR, predicate, train_data_df, surrogate_name),  # Baseline
-                # (ORACLE_PREDICTOR, predicate, train_data_df_subset_min_doc_fraction, surrogate_name),    # Oracle
-            ])
-            
+            all_new_prediction_tasks.append(
+                (BASELINE_PREDICTOR, predicate, train_data_df, surrogate_name)  # Proxy (always)
+            )
+            if not proxy_predictor_only:
+                all_new_prediction_tasks.append(
+                    (ORACLE_PREDICTOR, predicate, train_data_df, surrogate_name)  # Oracle (all fractions)
+                )
+
             # Add new candidates
             for doc_fraction in CANDIDATE_FRACTIONS:
                 all_candidates.append((surrogate_name, BASELINE_PREDICTOR, doc_fraction))
+                if proxy_predictor_only:
+                    continue  # Skip oracle candidates in proxy-only mode
                 if doc_fraction == 1.0:
                     # No need to add oracle on full doc as a candidate
                     continue
-                # if doc_fraction == min(CANDIDATE_FRACTIONS):
-                #     all_candidates.append((surrogate_name, ORACLE_PREDICTOR, doc_fraction))
+                all_candidates.append((surrogate_name, ORACLE_PREDICTOR, doc_fraction))
         
         # Execute all prediction tasks in parallel
         console.print(f"[bold cyan]Running {len(all_new_prediction_tasks)} prediction tasks in parallel...[/bold cyan]")
